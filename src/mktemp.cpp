@@ -144,6 +144,11 @@ static wchar_t *get_full_path(const wchar_t *const path)
 	DWORD buff_len = 0U;
 	wchar_t *buffer = NULL;
 
+	if(!path)
+	{
+		return NULL;
+	}
+
 	for(;;)
 	{
 		const DWORD result = GetFullPathName(path, buff_len, buffer, NULL);
@@ -191,16 +196,12 @@ static LONG directory_exists(const wchar_t *const path)
 static BOOL try_create_directory(const wchar_t *const path)
 {
 	DWORD fail_count = 0U;
-	LONG result;
-	while((result = directory_exists(path)) < 1L)
+	LONG result = directory_exists(path);
+	while(result < 1L)
 	{
 		if((result < 0L) || (++fail_count > 31U))
 		{
 			return FALSE; /*exists, but it is a file (or failed too often)*/
-		}
-		if(fail_count > 16U)
-		{
-			Sleep(0U);
 		}
 		if(!CreateDirectoryW(path, NULL))
 		{
@@ -215,6 +216,7 @@ static BOOL try_create_directory(const wchar_t *const path)
 				return FALSE; /*the directory syntax is invalid*/
 			}
 		}
+		result = directory_exists(path);
 	}
 	return TRUE;
 }
@@ -228,13 +230,20 @@ static wchar_t *get_environment_path(const wchar_t *const variable_name)
 	wchar_t *env_value = get_environment_variable(variable_name);
 	if(env_value)
 	{
-		wchar_t *const path_full = get_full_path(env_value);
-		if(path_full)
+		if(env_value[0U])
 		{
-			if(try_create_directory(path_full))
+			wchar_t *const path_full = get_full_path(env_value);
+			if(path_full)
 			{
-				LocalFree(env_value);
-				return path_full;
+				if(try_create_directory(path_full))
+				{
+					LocalFree(env_value);
+					return path_full;
+				}
+				else
+				{
+					LocalFree(path_full);
+				}
 			}
 		}
 		LocalFree(env_value);
@@ -319,6 +328,26 @@ static wchar_t *get_current_directory(void)
 			return NULL;
 		}
 	}
+}
+
+static wchar_t *get_user_directory(const wchar_t *const path)
+{
+	if(path && path[0U])
+	{
+		wchar_t *const path_full = get_full_path(path);
+		if(path_full)
+		{
+			if(try_create_directory(path_full))
+			{
+				return path_full;
+			}
+			else
+			{
+				LocalFree(path_full);
+			}
+		}
+	}
+	return NULL;
 }
 
 /* ======================================================================= */
@@ -425,34 +454,37 @@ static BOOL create_temp_directory(wchar_t *const buffer, const wchar_t *const pa
 	return FALSE;
 }
 
-static wchar_t *generate_temp_item(const UINT index, const BOOL make_directory, const wchar_t *const suffix, random_t *const rnd)
+static wchar_t *generate_temp_item(const LONG index, const BOOL make_directory, const wchar_t *const suffix, random_t *const rnd, const wchar_t *const user_directory)
 {
 	wchar_t *base_path = NULL;
 	switch(index)
 	{
-	case 0U:
+	case 0L:
 		base_path = get_environment_path(L"TMP"); /*try first!*/
 		break;
-	case 1U:
+	case 1L:
 		base_path = get_environment_path(L"TEMP");
 		break;
-	case 2U:
+	case 2L:
 		base_path = get_shell_folder_path(CSIDL_LOCAL_APPDATA, L"\\Temp");
 		break;
-	case 3U:
-		base_path = get_shell_folder_path(CSIDL_APPDATA, L"\\Temp");
-		break;
-	case 4U:
+	case 3L:
 		base_path = get_shell_folder_path(CSIDL_PROFILE, L"\\.cache");
 		break;
-	case 5U:
+	case 4L:
 		base_path = get_shell_folder_path(CSIDL_PERSONAL, NULL);
 		break;
-	case 6U:
+	case 5L:
 		base_path = get_shell_folder_path(CSIDL_DESKTOPDIRECTORY, NULL);
 		break;
-	case 7U:
+	case 6L:
+		base_path = get_shell_folder_path(CSIDL_WINDOWS, L"\\Temp");
+		break;
+	case 7L:
 		base_path = get_current_directory(); /*last fallback*/
+		break;
+	default:
+		base_path = get_user_directory(user_directory); /*user-specified*/
 		break;
 	}
 
@@ -486,6 +518,17 @@ static wchar_t *generate_temp_item(const UINT index, const BOOL make_directory, 
 	return NULL;
 }
 
+/* ======================================================================= */
+/* Parameters                                                              */
+/* ======================================================================= */
+
+typedef struct
+{
+	BOOL print_manpage, make_directory;
+	const wchar_t *user_directory;
+}
+param_t;
+
 static BOOL validate_suffix(const HANDLE std_err, const wchar_t *const suffix)
 {
 	const DWORD len = lstrlenW(suffix);
@@ -497,10 +540,61 @@ static BOOL validate_suffix(const HANDLE std_err, const wchar_t *const suffix)
 
 	for(DWORD i = 0U; i < len; ++i)
 	{
-		if(!(((suffix[i] >= L'A') && (suffix[i] <= L'Z')) || ((suffix[i] >= L'a') && (suffix[i] <= L'z')) || ((suffix[i] >= L'0') && (suffix[i] <= L'9')) || (suffix[i] == '_')))
+		if(
+			(suffix[i] == L'<') || (suffix[i] == L'>')  || (suffix[i] == L':') || (suffix[i] == L'.') || (suffix[i] == L'"') ||
+			(suffix[i] == L'/') || (suffix[i] == L'\\') || (suffix[i] == L'|') || (suffix[i] == L'?') || (suffix[i] == L'*')
+		)
 		{
 			print_text(std_err, "Error: Suffix contains an invalid character!\n");
 			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+static BOOL parse_parameters(const HANDLE std_err, int *const arg_offset, const int argc, const wchar_t *const *const argv, param_t *const param)
+{
+	SecureZeroMemory(param, sizeof(param_t));
+
+	while(*arg_offset < argc)
+	{
+		if((argv[*arg_offset][0U] == L'-') || (argv[*arg_offset][1U] == L'-'))
+		{
+			const wchar_t *const arg_name = argv[(*arg_offset)++] + 2U;
+			if(!(*arg_name))
+			{
+				break; /*stop parsing*/
+			}
+			else if((!lstrcmpiW(arg_name, L"help")) || (!lstrcmpiW(arg_name, L"version")))
+			{
+				param->print_manpage = TRUE;
+			}
+			else if(!lstrcmpiW(arg_name, L"dir"))
+			{
+				param->make_directory = TRUE;
+			}
+			else if(!lstrcmpiW(arg_name, L"path"))
+			{
+				if((*arg_offset < argc) && argv[*arg_offset] && argv[*arg_offset][0U])
+				{
+					param->user_directory = argv[(*arg_offset)++];
+				}
+				else
+				{
+					print_text(std_err, "Error: Option '--path' is missing a required argument!\n");
+					return FALSE;
+				}
+			}
+			else
+			{
+				print_text(std_err, "Error: Unsupported option encountered!\n");
+				return FALSE;
+			}
+		}
+		else
+		{
+			break;
 		}
 	}
 
@@ -516,35 +610,36 @@ static BOOL validate_suffix(const HANDLE std_err, const wchar_t *const suffix)
 static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 {
 	UINT result = 1U, prev_cp = 0U;
+	int arg_offset = 1;
 	wchar_t *temp_item = NULL;
 	CHAR *temp_item_utf8 = NULL;
-	random_t rnd;
 
 	const HANDLE std_out = GetStdHandle(STD_OUTPUT_HANDLE);
 	const HANDLE std_err = GetStdHandle(STD_ERROR_HANDLE);
 
-	if(argc > 1)
+	param_t param;
+	if(!parse_parameters(std_err, &arg_offset, argc, argv, &param))
 	{
-		if((lstrcmpiW(argv[1], L"--help") == 0) || (lstrcmpiW(argv[1], L"/?") == 0) || (lstrcmpiW(argv[1], L"-?") == 0))
-		{
-			print_text(std_err, "mktemp [" __DATE__ "]\n\n");
-			print_text(std_err, "Usage:\n");
-			print_text(std_err, "  mktemp.exe [--dir] [<suffix>]\n\n");
-			return 0U;
-		}
-		else if(lstrcmpiW(argv[1], L"--version") == 0)
-		{
-			print_text(std_err, "mktemp [" __DATE__ "] [" __TIME__ "]\n");
-			return 0U;
-		}
+		return 1U;
 	}
 
-	const BOOL make_directory = (argc > 1) && (lstrcmpiW(argv[1], L"--dir") == 0);
-	const wchar_t *const suffix = (argc > ARG_OFFSET) ? argv[ARG_OFFSET] : L"tmp";
+	if(param.print_manpage)
+	{
+		print_text(std_err, "mktemp [" __DATE__ "], by LoRd_MuldeR <MuldeR2@GMX.de>\n");
+		print_text(std_err, "Generates a unique temporary file name or temporary sub-directory.\n\n");
+		print_text(std_err, "Usage:\n");
+		print_text(std_err, "  mktemp.exe [--dir] [--path <path>] [<suffix>]\n\n");
+		print_text(std_err, "Options:\n");
+		print_text(std_err, "  --dir   Create a temporary sub-directory instead of a file\n");
+		print_text(std_err, "  --path  Use the specified path, instead of the system's TEMP path\n\n");
+		print_text(std_err, "If 'suffix' is not specified, the default suffix '.tmp' is used!\n\n");
+		return 0U;
+	}
 
+	const wchar_t *const suffix = (arg_offset < argc) ? argv[arg_offset] : L"tmp";
 	if(!validate_suffix(std_err, suffix))
 	{
-		goto clean_up;
+		return 1U;
 	}
 
 	if(GetFileType(std_out) == FILE_TYPE_CHAR)
@@ -553,17 +648,28 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 		SetConsoleOutputCP(CP_UTF8);
 	}
 
+	random_t rnd;
 	random_seed(&rnd);
 
-	for(UINT index = 0U; index < 8U; ++index)
+	if(param.user_directory)
 	{
-		if(temp_item = generate_temp_item(index, make_directory, suffix, &rnd))
+		if(temp_item = generate_temp_item(-1L, param.make_directory, suffix, &rnd, param.user_directory))
 		{
 			goto success;
 		}
 	}
+	else
+	{
+		for(LONG index = 0L; index < 8L; ++index)
+		{
+			if(temp_item = generate_temp_item(index, param.make_directory, suffix, &rnd, NULL))
+			{
+				goto success;
+			}
+		}
+	}
 	
-	print_text(std_err, make_directory ? "Error: Failed to generate temporary directory!\n" : "Error: Failed to generate temporary file!\n");
+	print_text(std_err, param.make_directory ? "Error: Failed to generate temporary directory!\n" : "Error: Failed to generate temporary file!\n");
 	goto clean_up;
 
 success:

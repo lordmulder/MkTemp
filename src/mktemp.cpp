@@ -12,18 +12,30 @@
 #define MAX_FAIL 2477U
 
 /* ======================================================================= */
-/* Text Output                                                             */
+/* Debug outputs                                                           */
 /* ======================================================================= */
 
-static __inline BOOL print_text(const HANDLE output, const CHAR *const text)
-{
-	DWORD bytes_written;
-	if(output != INVALID_HANDLE_VALUE)
-	{
-		return WriteFile(output, text, lstrlenA(text), &bytes_written, NULL);
-	}
-	return TRUE;
-}
+#define TRACE(STR) do \
+{ \
+	if(param->debug_output) print_text(std_err, (STR)); \
+} \
+while(0)
+
+#define TRACE_FMT(FMT, LEN, ...) do \
+{ \
+	if(param->debug_output) \
+	{ \
+		if(wchar_t *const _trace = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (LEN))) \
+		{ \
+			if(format_str(_trace, (FMT), __VA_ARGS__)) \
+			{ \
+				print_text_utf16(std_err, _trace, CP_UTF8); \
+			} \
+			LocalFree(_trace); \
+		} \
+	} \
+} \
+while(0)
 
 /* ======================================================================= */
 /* String Routines                                                         */
@@ -85,12 +97,40 @@ static wchar_t *concat_str(const wchar_t *const str1, const wchar_t *const str2)
 		wchar_t *const buffer = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (lstrlenW(str1) + lstrlenW(str2) + 1U));
 		if(buffer)
 		{
-			lstrcpy(buffer, str1);
-			lstrcat(buffer, str2);
+			lstrcpyW(buffer, str1);
+			lstrcatW(buffer, str2);
 			return buffer;
 		}
 	}
 	return NULL;
+}
+
+/* ======================================================================= */
+/* Text Output                                                             */
+/* ======================================================================= */
+
+static __inline BOOL print_text(const HANDLE output, const CHAR *const text)
+{
+	DWORD bytes_written;
+	if(output != INVALID_HANDLE_VALUE)
+	{
+		return WriteFile(output, text, lstrlenA(text), &bytes_written, NULL);
+	}
+	return TRUE;
+}
+
+static __inline BOOL print_text_utf16(const HANDLE output, const wchar_t *const text, const UINT code_page)
+{
+	if(output != INVALID_HANDLE_VALUE)
+	{
+		BOOL result = FALSE;
+		if(CHAR *const byte_str = utf16_to_bytes(text, code_page))
+		{
+			result = print_text(output, byte_str);
+		}
+		return result;
+	}
+	return TRUE;
 }
 
 /* ======================================================================= */
@@ -393,138 +433,12 @@ static __inline DWORD random_next(random_t *const state)
 }
 
 /* ======================================================================= */
-/* Create Temporaty File/Directory                                         */
-/* ======================================================================= */
-
-static const wchar_t *const TEMPLATE = L"%s\\~%07lX.%s";
-
-static BOOL create_temp_file(wchar_t *const buffer, const wchar_t *const path, const wchar_t *const suffix, random_t *const rnd)
-{
-	DWORD fail_count = 0U;
-
-	for(UINT i = 0U; i < 0x7FFFFFFF; ++i)
-	{
-		format_str(buffer, TEMPLATE, path, random_next(rnd) & 0xFFFFFFF, suffix);
-		const HANDLE handle = CreateFile(buffer, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, 0U, NULL);
-		if(handle != INVALID_HANDLE_VALUE)
-		{
-			CloseHandle(handle);
-			return TRUE;
-		}
-		else
-		{
-			const DWORD error = GetLastError();
-			if((error != ERROR_FILE_EXISTS) && (error != ERROR_ALREADY_EXISTS))
-			{
-				if(++fail_count > MAX_FAIL)
-				{
-					return FALSE;
-				}
-			}
-		}
-	}
-
-	return FALSE;
-}
-
-static BOOL create_temp_directory(wchar_t *const buffer, const wchar_t *const path, const wchar_t *const suffix, random_t *const rnd)
-{
-	DWORD fail_count = 0U;
-
-	for(UINT i = 0U; i < 0x7FFFFFFF; ++i)
-	{
-		format_str(buffer, TEMPLATE, path, random_next(rnd) & 0xFFFFFFF, suffix);
-		if(CreateDirectoryW(buffer, NULL))
-		{
-			return TRUE;
-		}
-		else
-		{
-			const DWORD error = GetLastError();
-			if((error != ERROR_FILE_EXISTS) && (error != ERROR_ALREADY_EXISTS))
-			{
-				if(++fail_count > MAX_FAIL)
-				{
-					return FALSE;
-				}
-			}
-		}
-	}
-
-	return FALSE;
-}
-
-static wchar_t *generate_temp_item(const LONG index, const BOOL make_directory, const wchar_t *const suffix, random_t *const rnd, const wchar_t *const user_directory)
-{
-	wchar_t *base_path = NULL;
-	switch(index)
-	{
-	case 0L:
-		base_path = get_environment_path(L"TMP"); /*try first!*/
-		break;
-	case 1L:
-		base_path = get_environment_path(L"TEMP");
-		break;
-	case 2L:
-		base_path = get_shell_folder_path(CSIDL_LOCAL_APPDATA, L"\\Temp");
-		break;
-	case 3L:
-		base_path = get_shell_folder_path(CSIDL_PROFILE, L"\\.cache");
-		break;
-	case 4L:
-		base_path = get_shell_folder_path(CSIDL_PERSONAL, NULL);
-		break;
-	case 5L:
-		base_path = get_shell_folder_path(CSIDL_DESKTOPDIRECTORY, NULL);
-		break;
-	case 6L:
-		base_path = get_shell_folder_path(CSIDL_WINDOWS, L"\\Temp");
-		break;
-	case 7L:
-		base_path = get_current_directory(); /*last fallback*/
-		break;
-	default:
-		base_path = get_user_directory(user_directory); /*user-specified*/
-		break;
-	}
-
-	if(!base_path)
-	{
-		return NULL; /*failed*/
-	}
-
-#if _DEBUG
-	OutputDebugStringW(base_path);
-#endif //_DEBUG
-
-	wchar_t *const buffer = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (lstrlenW(base_path) + lstrlenW(suffix) + 12U));
-	if(!buffer)
-	{
-		LocalFree(base_path);
-		return NULL; /*malloc failed*/
-	}
-
-	if(make_directory ? create_temp_directory(buffer, base_path, suffix, rnd) : create_temp_file(buffer, base_path, suffix, rnd))
-	{
-		const DWORD len = lstrlenW(buffer);
-		buffer[len] = L'\n';
-		buffer[len + 1U] = L'\0';
-		LocalFree(base_path);
-		return buffer;
-	}
-
-	LocalFree(buffer);
-	LocalFree(base_path);
-	return NULL;
-}
-
-/* ======================================================================= */
 /* Parameters                                                              */
 /* ======================================================================= */
 
 typedef struct
 {
-	BOOL print_manpage, make_directory;
+	BOOL print_manpage, make_directory, debug_output;
 	const wchar_t *user_directory;
 }
 param_t;
@@ -570,7 +484,7 @@ static BOOL parse_parameters(const HANDLE std_err, int *const arg_offset, const 
 			{
 				param->print_manpage = TRUE;
 			}
-			else if(!lstrcmpiW(arg_name, L"dir"))
+			else if(!lstrcmpiW(arg_name, L"mkdir"))
 			{
 				param->make_directory = TRUE;
 			}
@@ -585,6 +499,10 @@ static BOOL parse_parameters(const HANDLE std_err, int *const arg_offset, const 
 					print_text(std_err, "Error: Option '--path' is missing a required argument!\n");
 					return FALSE;
 				}
+			}
+			else if(!lstrcmpiW(arg_name, L"debug"))
+			{
+				param->debug_output = TRUE;
 			}
 			else
 			{
@@ -602,6 +520,163 @@ static BOOL parse_parameters(const HANDLE std_err, int *const arg_offset, const 
 }
 
 /* ======================================================================= */
+/* Create Temporaty File/Directory                                         */
+/* ======================================================================= */
+
+static const wchar_t *const TEMPLATE = L"%s\\~%07lX.%s";
+
+static BOOL generate_file(const HANDLE std_err, const param_t *const param, wchar_t *const buffer, const wchar_t *const path, const wchar_t *const suffix, random_t *const rnd)
+{
+	DWORD fail_count = 0U;
+
+	for(UINT i = 0U; i < 0x7FFFFFFF; ++i)
+	{
+		if(format_str(buffer, TEMPLATE, path, random_next(rnd) & 0xFFFFFFF, suffix))
+		{
+			TRACE_FMT(L"Trying to create file: \"%s\"\n", lstrlenW(buffer) + 28U, buffer);
+			const HANDLE handle = CreateFile(buffer, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, 0U, NULL);
+			if(handle != INVALID_HANDLE_VALUE)
+			{
+				TRACE("Success.\n");
+				CloseHandle(handle);
+				return TRUE;
+			}
+			else
+			{
+				const DWORD error = GetLastError();
+				if((error != ERROR_FILE_EXISTS) && (error != ERROR_ALREADY_EXISTS))
+				{
+					TRACE("Failed!\n");
+					if(++fail_count > MAX_FAIL)
+					{
+						TRACE("Giving up!\n");
+						return FALSE;
+					}
+				}
+				else
+				{
+					TRACE("Already exists!\n");
+				}
+			}
+		}
+	}
+
+	TRACE("Giving up!\n");
+	return FALSE;
+}
+
+static BOOL generate_directory(const HANDLE std_err, const param_t *const param, wchar_t *const buffer, const wchar_t *const path, const wchar_t *const suffix, random_t *const rnd)
+{
+	DWORD fail_count = 0U;
+
+	for(UINT i = 0U; i < 0x7FFFFFFF; ++i)
+	{
+		if(format_str(buffer, TEMPLATE, path, random_next(rnd) & 0xFFFFFFF, suffix))
+		{
+			TRACE_FMT(L"Trying to create directory: \"%s\"\n", lstrlenW(buffer) + 33U, buffer);
+			if(CreateDirectoryW(buffer, NULL))
+			{
+				TRACE("Success.\n");
+				return TRUE;
+			}
+			else
+			{
+				const DWORD error = GetLastError();
+				if((error != ERROR_FILE_EXISTS) && (error != ERROR_ALREADY_EXISTS))
+				{
+					TRACE("Failed!\n");
+					if(++fail_count > MAX_FAIL)
+					{
+						TRACE("Giving up!\n");
+						return FALSE;
+					}
+				}
+				else
+				{
+					TRACE("Already exists!\n");
+				}
+			}
+		}
+	}
+
+	TRACE("Giving up!\n");
+	return FALSE;
+}
+
+static wchar_t *generate(const HANDLE std_err, const param_t *const param, const LONG index, const wchar_t *const suffix, random_t *const rnd)
+{
+	wchar_t *base_path = NULL;
+	switch(index)
+	{
+	case 0L:
+		TRACE("Trying environment variable %TMP%...\n");
+		base_path = get_environment_path(L"TMP");
+		break;
+	case 1L:
+		TRACE("Trying environment variable %TEMP%...\n");
+		base_path = get_environment_path(L"TEMP");
+		break;
+	case 2L:
+		TRACE("Trying shell directory CSIDL_LOCAL_APPDATA...\n");
+		base_path = get_shell_folder_path(CSIDL_LOCAL_APPDATA, L"\\Temp");
+		break;
+	case 3L:
+		TRACE("Trying shell directory CSIDL_PROFILE...\n");
+		base_path = get_shell_folder_path(CSIDL_PROFILE, L"\\.cache");
+		break;
+	case 4L:
+		TRACE("Trying shell directory CSIDL_PERSONAL...\n");
+		base_path = get_shell_folder_path(CSIDL_PERSONAL, NULL);
+		break;
+	case 5L:
+		TRACE("Trying shell directory CSIDL_DESKTOPDIRECTORY...\n");
+		base_path = get_shell_folder_path(CSIDL_DESKTOPDIRECTORY, NULL);
+		break;
+	case 6L:
+		TRACE("Trying shell directory CSIDL_WINDOWS...\n");
+		base_path = get_shell_folder_path(CSIDL_WINDOWS, L"\\Temp");
+		break;
+	case 7L:
+		TRACE("Trying current directory...\n");
+		base_path = get_current_directory(); /*last fallback*/
+		break;
+	default:
+		TRACE("Trying user-defined directory...\n");
+		base_path = get_user_directory(param->user_directory); /*user-specified*/
+		break;
+	}
+
+	if(!base_path)
+	{
+		TRACE("Failed!\n");
+		return NULL; /*failed*/
+	}
+
+	TRACE_FMT(L"Using directory: \"%s\"\n", lstrlenW(base_path) + 21U, base_path);
+
+	wchar_t *const buffer = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (lstrlenW(base_path) + lstrlenW(suffix) + 12U));
+	if(!buffer)
+	{
+		TRACE("Memory allocation has failed!\n");
+		LocalFree(base_path);
+		return NULL; /*malloc failed*/
+	}
+
+	if(param->make_directory ? generate_directory(std_err, param, buffer, base_path, suffix, rnd) : generate_file(std_err, param, buffer, base_path, suffix, rnd))
+	{
+		const DWORD len = lstrlenW(buffer);
+		buffer[len] = L'\n';
+		buffer[len + 1U] = L'\0';
+		LocalFree(base_path);
+		return buffer;
+	}
+
+	LocalFree(buffer);
+	LocalFree(base_path);
+	return NULL;
+}
+
+/* ======================================================================= */
 /* MAIN                                                                    */
 /* ======================================================================= */
 
@@ -611,8 +686,8 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 {
 	UINT result = 1U, prev_cp = 0U;
 	int arg_offset = 1;
-	wchar_t *temp_item = NULL;
-	CHAR *temp_item_utf8 = NULL;
+	wchar_t *generated_path = NULL;
+	CHAR *generated_path_utf8 = NULL;
 
 	const HANDLE std_out = GetStdHandle(STD_OUTPUT_HANDLE);
 	const HANDLE std_err = GetStdHandle(STD_ERROR_HANDLE);
@@ -630,8 +705,9 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 		print_text(std_err, "Usage:\n");
 		print_text(std_err, "  mktemp.exe [--dir] [--path <path>] [<suffix>]\n\n");
 		print_text(std_err, "Options:\n");
-		print_text(std_err, "  --dir   Create a temporary sub-directory instead of a file\n");
-		print_text(std_err, "  --path  Use the specified path, instead of the system's TEMP path\n\n");
+		print_text(std_err, "  --mkdir  Create a temporary sub-directory instead of a file\n");
+		print_text(std_err, "  --path   Use the specified path, instead of the system's TEMP path\n");
+		print_text(std_err, "  --debug  Generate additional debug output (written to stderr)\n\n");
 		print_text(std_err, "If 'suffix' is not specified, the default suffix '.tmp' is used!\n\n");
 		return 0U;
 	}
@@ -653,7 +729,7 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 
 	if(param.user_directory)
 	{
-		if(temp_item = generate_temp_item(-1L, param.make_directory, suffix, &rnd, param.user_directory))
+		if(generated_path = generate(std_err, &param, -1L, suffix, &rnd))
 		{
 			goto success;
 		}
@@ -662,7 +738,7 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 	{
 		for(LONG index = 0L; index < 8L; ++index)
 		{
-			if(temp_item = generate_temp_item(index, param.make_directory, suffix, &rnd, NULL))
+			if(generated_path = generate(std_err, &param, index, suffix, &rnd))
 			{
 				goto success;
 			}
@@ -674,26 +750,26 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 
 success:
 
-	temp_item_utf8 = utf16_to_bytes(temp_item, CP_UTF8);
-	if(!temp_item_utf8)
+	generated_path_utf8 = utf16_to_bytes(generated_path, CP_UTF8);
+	if(!generated_path_utf8)
 	{
 		print_text(std_err, "Error: Failed to convert file name to UFT-8 format!\n");
 		goto clean_up;
 	}
 
-	print_text(std_out, temp_item_utf8);
+	print_text(std_out, generated_path_utf8);
 	result = 0U;
 
 clean_up:
 
-	if(temp_item)
+	if(generated_path)
 	{
-		LocalFree((HLOCAL)temp_item);
+		LocalFree((HLOCAL)generated_path);
 	}
 
-	if(temp_item_utf8)
+	if(generated_path_utf8)
 	{
-		LocalFree((HLOCAL)temp_item_utf8);
+		LocalFree((HLOCAL)generated_path_utf8);
 	}
 
 	if(prev_cp)

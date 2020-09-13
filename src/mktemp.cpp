@@ -703,12 +703,12 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 		print_text(std_err, "mktemp [" __DATE__ "], by LoRd_MuldeR <MuldeR2@GMX.de>\n");
 		print_text(std_err, "Generates a unique temporary file name or temporary sub-directory.\n\n");
 		print_text(std_err, "Usage:\n");
-		print_text(std_err, "  mktemp.exe [--dir] [--path <path>] [<suffix>]\n\n");
+		print_text(std_err, "  mktemp.exe [--mkdir] [--path <path>] [<suffix>]\n\n");
 		print_text(std_err, "Options:\n");
 		print_text(std_err, "  --mkdir  Create a temporary sub-directory instead of a file\n");
 		print_text(std_err, "  --path   Use the specified path, instead of the system's TEMP path\n");
 		print_text(std_err, "  --debug  Generate additional debug output (written to stderr)\n\n");
-		print_text(std_err, "If 'suffix' is not specified, the default suffix '.tmp' is used!\n\n");
+		print_text(std_err, "If 'suffix' is not specified, the default suffix '*.tmp' is used!\n\n");
 		return 0U;
 	}
 

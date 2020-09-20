@@ -9,7 +9,7 @@
 #include <ShellAPI.h>
 #include <Shlobj.h>
 
-#define MAX_FAIL 2477U
+#define MAX_FAIL 97U
 
 /* ======================================================================= */
 /* Debug outputs                                                           */
@@ -90,6 +90,17 @@ static void remove_trailing_sep(wchar_t *const path)
 	}
 }
 
+static void trim_right(wchar_t *const path)
+{
+	DWORD len = lstrlenW(path);
+	while((len > 0U) && (
+		(path[len - 1U] == L' ')  || (path[len - 1U] == L'\t') || (path[len - 1U] == L'\n') ||
+		(path[len - 1U] == L'\v') || (path[len - 1U] == L'\f') || (path[len - 1U] == L'\r')))
+	{
+		path[--len] = L'\0';
+	}
+}
+
 static wchar_t *concat_str(const wchar_t *const str1, const wchar_t *const str2)
 {
 	if(str1 && str2)
@@ -103,6 +114,11 @@ static wchar_t *concat_str(const wchar_t *const str1, const wchar_t *const str2)
 		}
 	}
 	return NULL;
+}
+
+static BOOL char_is_alpha(const wchar_t c)
+{
+	return ((c >= L'A') && (c <= L'Z')) || ((c >= L'a') && (c <= L'z')) ? TRUE : FALSE;
 }
 
 /* ======================================================================= */
@@ -127,6 +143,7 @@ static __inline BOOL print_text_utf16(const HANDLE output, const wchar_t *const 
 		if(CHAR *const byte_str = utf16_to_bytes(text, code_page))
 		{
 			result = print_text(output, byte_str);
+			LocalFree(byte_str);
 		}
 		return result;
 	}
@@ -233,15 +250,19 @@ static LONG directory_exists(const wchar_t *const path)
 	return 0L;
 }
 
-static BOOL try_create_directory(const wchar_t *const path)
+static BOOL _try_create_directory(const wchar_t *const path)
 {
 	DWORD fail_count = 0U;
 	LONG result = directory_exists(path);
 	while(result < 1L)
 	{
-		if((result < 0L) || (++fail_count > 31U))
+		if((result < 0L) || (++fail_count > MAX_FAIL))
 		{
 			return FALSE; /*exists, but it is a file (or failed too often)*/
+		}
+		if(fail_count > 1U)
+		{
+			Sleep(0U); /*wait a little before retry*/
 		}
 		if(!CreateDirectoryW(path, NULL))
 		{
@@ -261,6 +282,19 @@ static BOOL try_create_directory(const wchar_t *const path)
 	return TRUE;
 }
 
+static BOOL initialize_directory(const wchar_t *const path)
+{
+	if(char_is_alpha(path[0U]) && (path[1U] == L':') && (path[2U] == L'\0'))
+	{
+		wchar_t root[4U] = { path[0U] , L':', L'\\', L'\0' };
+		return _try_create_directory(root);
+	}
+	else
+	{
+		return _try_create_directory(path);
+	}
+}
+
 /* ======================================================================= */
 /* Path Detection                                                          */
 /* ======================================================================= */
@@ -270,12 +304,14 @@ static wchar_t *get_environment_path(const wchar_t *const variable_name)
 	wchar_t *env_value = get_environment_variable(variable_name);
 	if(env_value)
 	{
+		trim_right(env_value);
 		if(env_value[0U])
 		{
 			wchar_t *const path_full = get_full_path(env_value);
 			if(path_full)
 			{
-				if(try_create_directory(path_full))
+				remove_trailing_sep(path_full);
+				if(initialize_directory(path_full))
 				{
 					LocalFree(env_value);
 					return path_full;
@@ -302,14 +338,14 @@ static wchar_t *get_shell_folder_path(const int csidl, const wchar_t *const suff
 	if(SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, buffer) == S_OK)
 	{
 		remove_trailing_sep(buffer);
-		if(try_create_directory(buffer))
+		if(initialize_directory(buffer))
 		{
 			if(suffix && suffix[0U])
 			{
 				wchar_t *const temp_path = concat_str(buffer, suffix);
 				if(temp_path)
 				{
-					if(try_create_directory(temp_path))
+					if(initialize_directory(temp_path))
 					{
 						LocalFree(buffer);
 						return temp_path;
@@ -344,7 +380,15 @@ static wchar_t *get_current_directory(void)
 			if(result < buff_len)
 			{
 				remove_trailing_sep(buffer);
-				return buffer;
+				if(initialize_directory(buffer))
+				{
+					return buffer;
+				}
+				else
+				{
+					LocalFree(buffer);
+					return NULL;
+				}
 			}
 			else
 			{
@@ -377,7 +421,8 @@ static wchar_t *get_user_directory(const wchar_t *const path)
 		wchar_t *const path_full = get_full_path(path);
 		if(path_full)
 		{
-			if(try_create_directory(path_full))
+			remove_trailing_sep(path_full);
+			if(initialize_directory(path_full))
 			{
 				return path_full;
 			}
@@ -552,6 +597,7 @@ static BOOL generate_file(const HANDLE std_err, const param_t *const param, wcha
 						TRACE("Giving up!\n");
 						return FALSE;
 					}
+					Sleep(0U);
 				}
 				else
 				{
@@ -590,6 +636,7 @@ static BOOL generate_directory(const HANDLE std_err, const param_t *const param,
 						TRACE("Giving up!\n");
 						return FALSE;
 					}
+					Sleep(0U);
 				}
 				else
 				{
@@ -687,7 +734,6 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 	UINT result = 1U, prev_cp = 0U;
 	int arg_offset = 1;
 	wchar_t *generated_path = NULL;
-	CHAR *generated_path_utf8 = NULL;
 
 	const HANDLE std_out = GetStdHandle(STD_OUTPUT_HANDLE);
 	const HANDLE std_err = GetStdHandle(STD_ERROR_HANDLE);
@@ -750,14 +796,7 @@ static UINT mktemp_main(const int argc, const wchar_t *const *const argv)
 
 success:
 
-	generated_path_utf8 = utf16_to_bytes(generated_path, CP_UTF8);
-	if(!generated_path_utf8)
-	{
-		print_text(std_err, "Error: Failed to convert file name to UFT-8 format!\n");
-		goto clean_up;
-	}
-
-	print_text(std_out, generated_path_utf8);
+	print_text_utf16(std_out, generated_path, CP_UTF8);
 	result = 0U;
 
 clean_up:
@@ -765,11 +804,6 @@ clean_up:
 	if(generated_path)
 	{
 		LocalFree((HLOCAL)generated_path);
-	}
-
-	if(generated_path_utf8)
-	{
-		LocalFree((HLOCAL)generated_path_utf8);
 	}
 
 	if(prev_cp)
